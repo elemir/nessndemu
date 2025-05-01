@@ -1,4 +1,4 @@
-package nesemu
+package nessndemu
 
 import "fmt"
 

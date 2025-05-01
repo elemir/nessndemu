@@ -16,7 +16,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 
 */
 
-package nesemu
+package nessndemu
 
 import (
 	"fmt"
@@ -31,15 +31,18 @@ const (
 
 	NESAPUOscCount = 5
 
-	NESAPINoIRQ      = 1073741824
+	NESAPINoIRQ      = 4611686018427387904
 	NESAPUIRQWaiting = 0
 
 	NESAPUShadowRegsCount = 21
 )
 
-// TODO(FIXME): we should understand what types should be here
 type (
-	void       = any
+	CPUAddr = cpu_addr_t
+)
+
+type (
+	// TODO(FIXME): we should understand what types should be heretype (
 	cpu_addr_t = unsigned
 	cpu_time_t = long
 )
@@ -49,7 +52,7 @@ type APU struct {
 	square1, square2 Square
 	noise            Noise
 	triangle         Triangle
-	dmc              DMC
+	dmc              *DMC
 	square_synth     *BlipSynth
 
 	lastTime    cpu_time_t // has been run until this time in current frame
@@ -65,13 +68,14 @@ type APU struct {
 
 	irqFlag cbool.Bool
 
-	irqNotifier func(user_data *void)
-	irqData     *void
+	irqNotifier func(user_data any)
+	irqData     any
 }
 
 func NewAPU() *APU {
 	var apu APU
 
+	apu.dmc = NewDMC()
 	apu.square_synth = NewBlipSynth(blip_good_quality, 30)
 
 	apu.dmc.apu = &apu
@@ -99,7 +103,7 @@ func (apu *APU) Reset(pal_mode cbool.Bool, initial_dmc_dac int) {
 		apu.framePeriod = 8314
 	}
 
-	// apu.dmc.pal_mode = pal_mode
+	apu.dmc.pal_mode = pal_mode
 	apu.noise.pal_mode = pal_mode
 
 	apu.square1.reset()
@@ -125,12 +129,10 @@ func (apu *APU) Reset(pal_mode cbool.Bool, initial_dmc_dac int) {
 		apu.WriteRegister(0, addr, data)
 	}
 
-	/*
-		apu.dmc.dac = initial_dmc_dac
-		if !apu.dmc.nonlinear {
-			apu.dmc.last_amp = initial_dmc_dac // prevent output transition
-		}
-	*/
+	apu.dmc.dac = initial_dmc_dac
+	if !apu.dmc.nonlinear {
+		apu.dmc.last_amp = initial_dmc_dac // prevent output transition
+	}
 
 	apu.ResetTriggers()
 }
@@ -148,16 +150,10 @@ func (apu *APU) ResetTriggers() {
 	apu.dmc.trigger = TriggerNone   // Looping samples would be nice to support.
 }
 
-func (apu *APU) Output(buffer *BlipBuffer, bufferTnd *BlipBuffer) {
-	for i := range 2 {
+func (apu *APU) Output(buffer *BlipBuffer) {
+	for i := range 5 {
 		apu.oscs[i].output = buffer
 	}
-
-	for i := range 2 {
-		apu.oscs[i+2].output = bufferTnd
-	}
-
-	apu.dmc.SetOutput(bufferTnd)
 }
 
 func (apu *APU) Volume(v float64) {
@@ -170,7 +166,7 @@ func (apu *APU) Volume(v float64) {
 	apu.dmc.synth.Volume(0.42545 * v)
 }
 
-func (apu *APU) DMCReader(reader func(*void, cpu_addr_t) int, user_data *void) {
+func (apu *APU) DMCReader(reader func(any, cpu_addr_t) int, user_data any) {
 	apu.dmc.rom_reader_data = user_data
 	apu.dmc.rom_reader = reader
 }
@@ -184,6 +180,7 @@ func (apu *APU) EndFrame(endTime cpu_time_t) {
 	apu.lastTime -= endTime
 	require(apu.lastTime >= 0)
 
+	fmt.Printf("EndFrame nextIRQ=%d endTime=%d NESAPINoIRQ=%d\n", apu.nextIRQ, endTime, NESAPINoIRQ)
 	if apu.nextIRQ != NESAPINoIRQ {
 		apu.nextIRQ -= endTime
 		assert(apu.nextIRQ >= 0)
@@ -200,6 +197,7 @@ func (apu *APU) EndFrame(endTime cpu_time_t) {
 			apu.earliestIRQ = 0
 		}
 	}
+	fmt.Printf("EndFrame after=true nextIRQ=%d endTime=%d NESAPINoIRQ=%d\n", apu.nextIRQ, endTime, NESAPINoIRQ)
 }
 
 var length_table = [0x20]unsigned_char{
@@ -219,6 +217,7 @@ func (apu *APU) WriteRegister(time cpu_time_t, addr cpu_addr_t, data int) {
 	}
 
 	apu.runUntil(time)
+	fmt.Printf("WriteRegister time=%d addr=%d data=%d nextIRQ=%d\n", time, addr, data, apu.nextIRQ)
 
 	if addr < 0x4014 {
 		// Write to channel
@@ -362,7 +361,6 @@ func (apu *APU) runUntil(end_time cpu_time_t) {
 		return
 	}
 
-	fmt.Printf("runUntil %d %d\n", end_time, apu.lastTime)
 	for {
 		// earlier of next frame time or end time
 		var time cpu_time_t = cpu_time_t(int(apu.lastTime) + apu.frameDelay) // WARNING(elemir): downconversion
@@ -392,6 +390,7 @@ func (apu *APU) runUntil(end_time cpu_time_t) {
 		case 0:
 			if !cbool.FromInt(apu.frameMode & 0xc0) {
 				apu.nextIRQ = cpu_time_t(int(time) + apu.framePeriod*4 + 1) // WARNING(elemir): downconversion
+				fmt.Printf("setup next IRQ nextIRQ=%d time=%d framePeriod=%d\n", apu.nextIRQ, time, apu.framePeriod)
 				apu.irqFlag = true
 			}
 			fallthrough

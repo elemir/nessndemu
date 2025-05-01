@@ -1,4 +1,4 @@
-package nesemu
+package nessndemu
 
 func increment_saturate(x byte) byte {
 	if int(x)+1 > 255 {

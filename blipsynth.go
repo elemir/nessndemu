@@ -1,4 +1,4 @@
-package nesemu
+package nessndemu
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	BLIP_BUFFER_ACCURACY = 32
+	BLIP_BUFFER_ACCURACY = 16
 	BLIP_PHASE_BITS      = 6
 
 	blip_res             = 1 << BLIP_PHASE_BITS
@@ -22,7 +22,7 @@ const (
 type (
 	imp_t = short
 
-	blip_resampled_time_t = long_long
+	blip_resampled_time_t = resampled_time_t
 	blip_time_t           = long
 )
 
@@ -51,7 +51,7 @@ func (bs *BlipSynth) offset_resampled(time blip_resampled_time_t, delta int, bli
 	// Fails if time is beyond end of Blip_Buffer, due to a bug in caller code or the
 	// need for a longer buffer as set by set_sample_rate().
 	fmt.Printf("offset_resampled time %d %d\n", time, blip_buf.buffer_size_)
-	assert((long)(time>>BLIP_BUFFER_ACCURACY) < blip_buf.buffer_size_)
+	assert((unsigned)(time>>BLIP_BUFFER_ACCURACY) < blip_buf.buffer_size_)
 	delta *= bs.impl.delta_factor
 	var phase int = int(time >> (BLIP_BUFFER_ACCURACY - BLIP_PHASE_BITS) & (blip_res - 1))
 	imp := bs.impulses[blip_res-phase:]
@@ -123,6 +123,10 @@ func (b *BlipSynth) Volume(v float64) {
 	}
 
 	b.impl.volume_unit(v * (1.0 / float64(rng)))
+}
+
+func (b *BlipSynth) offset_inline(time blip_time_t, delta int, buf *BlipBuffer) {
+	b.offset_resampled(blip_resampled_time_t(time)*blip_resampled_time_t(buf.factor_)+buf.offset_, delta, buf)
 }
 
 func (b *BlipSynth) offset(t blip_time_t, delta int, buf *BlipBuffer) {

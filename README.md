@@ -4,6 +4,7 @@ nessndemu is a port of [NES Sound Emulator library](https://www.slack.net/~ant/l
 
 ## TODO
 
-- [ ] Port the SimpleAPU interface
+- [x] Port the SimpleAPU interface
 - [ ] Port of the demo.cpp and check that it works fine
 - [ ] Support square wave
+- [ ] Support triangle wave

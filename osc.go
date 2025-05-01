@@ -1,4 +1,4 @@
-package nesemu
+package nessndemu
 
 import (
 	"fmt"
@@ -150,7 +150,6 @@ func (n *Noise) run(time cpu_time_t, end_time cpu_time_t) {
 		n.synth.offset(time, delta, n.output)
 	}
 
-	fmt.Printf("run time=%d delay=%d\n", time, n.delay)
 	time += cpu_time_t(n.delay)
 	if time < end_time {
 		var mode_flag int = 0x80
@@ -165,7 +164,7 @@ func (n *Noise) run(time cpu_time_t, end_time cpu_time_t) {
 				feedback := (n.noise & 0x01) ^ ((n.noise >> tap) & 0x01)
 				n.noise = (n.noise >> 1) | (feedback << 14)
 				time += cpu_time_t(period)
-				if time < end_time {
+				if time >= end_time {
 					break
 				}
 			}
@@ -219,50 +218,193 @@ func (t *Triangle) clock_linear_counter() {
 func (t *Triangle) run(time cpu_time_t, param2 cpu_time_t) {
 }
 
-/*
-	int address;    // address of next byte to read
-	int period;
-	//int length_counter; // bytes remaining to play (already defined in Nes_Osc)
-	int buf;
-	int bits_remain;
-	int bits;
-	bool buf_full;
-	bool silence;
-
-	enum { loop_flag = 0x40 };
-
-	int dac;
-	int paused_dac;
-
-	cpu_time_t next_irq;
-	bool irq_enabled;
-	bool irq_flag;
-	bool pal_mode;
-	bool nonlinear;
-*/
+const (
+	loop_flag = 0x40
+)
 
 type DMC struct {
 	Osc
 
-	nextIRQ   cpu_time_t
-	irq_flag  cbool.Bool
-	nonlinear cbool.Bool
+	address     int // address of next byte to read
+	period      int
+	buf         int
+	bits_remain int
+	bits        int
+	buf_empty   bool
+	silence     bool
 
-	rom_reader      func(*void, cpu_addr_t) int
-	rom_reader_data *void
+	dac        int
+	paused_dac int
+
+	nextIRQ     cpu_time_t
+	irq_enabled cbool.Bool
+	irq_flag    cbool.Bool
+	pal_mode    cbool.Bool
+	nonlinear   cbool.Bool
+
+	rom_reader      func(any, cpu_addr_t) int
+	rom_reader_data any
 
 	apu   *APU
 	synth *BlipSynth
 }
 
-func (d *DMC) SetOutput(bufferTnd *BlipBuffer) {
+func NewDMC() *DMC {
+	dmc := DMC{
+		bits_remain: 1,
+		nextIRQ:     NESAPINoIRQ,
+		period:      0x036,
+		buf_empty:   true,
+		silence:     true,
+	}
+
+	dmc.reset()
+
+	return &dmc
 }
 
-func (d *DMC) run(time cpu_time_t, param2 cpu_time_t) {
+func (d *DMC) run(time cpu_time_t, end_time cpu_time_t) {
+	if d.output == nil {
+		return
+
+	}
+
+	var delta int = d.update_amp(d.dac)
+	if delta != 0 {
+		d.synth.offset(time, delta, d.output)
+	}
+
+	time += cpu_time_t(d.delay)
+	if time < end_time {
+		var bits_remain int = d.bits_remain
+		if d.silence && d.buf_empty {
+			var count int = (int(end_time-time) + d.period - 1) / d.period
+			bits_remain = (bits_remain-1+8-(count%8))%8 + 1
+			time += cpu_time_t(count * d.period)
+		} else {
+			// Blip_Buffer* const output = this->output;
+			var period int = d.period
+			var bits int = d.bits
+			var dac int = d.dac
+
+			for {
+				if !d.silence {
+					var step int = (bits&1)*4 - 2
+					bits >>= 1
+					if unsigned(dac+step) <= 0x7F {
+						dac += step
+						d.synth.offset_inline(time, step, d.output)
+					}
+				}
+
+				time += cpu_time_t(period)
+
+				bits_remain--
+				if bits_remain == 0 {
+					bits_remain = 8
+					if d.buf_empty {
+						d.silence = true
+					} else {
+						d.silence = false
+						bits = d.buf
+						d.buf_empty = true
+						d.fill_buffer()
+					}
+				}
+
+				if time >= end_time {
+					break
+				}
+			}
+
+			d.dac = dac
+			d.last_amp = dac
+			d.bits = bits
+		}
+		d.bits_remain = bits_remain
+	}
+
+	d.delay = int(time - end_time)
 }
 
 func (d *DMC) start() {
+	fmt.Printf("dmc started\n")
 }
 
-func (d *DMC) write_register(reg int, data int) {
+func (d *DMC) fill_buffer() {
+	if d.buf_empty && d.length_counter != 0 {
+		require(d.rom_reader != nil) // rom_reader must be set
+		d.buf = d.rom_reader(d.rom_reader_data, cpu_addr_t(0x8000+d.address))
+		d.address = (d.address + 1) & 0x7FFF
+		d.buf_empty = false
+		d.length_counter--
+		if d.length_counter == 0 {
+			if cbool.FromInt(d.regs[0] & loop_flag) {
+				d.reload_sample()
+			} else {
+				d.apu.osc_enables &= ^0x10
+				d.irq_flag = d.irq_enabled
+				d.nextIRQ = NESAPINoIRQ
+				d.apu.irq_changed()
+			}
+		}
+	}
+}
+
+func (d *DMC) reload_sample() {
+	d.address = 0x4000 + int(d.regs[2])*0x40
+	d.length_counter = int(d.regs[3])*0x10 + 1
+}
+
+var (
+	dmc_period_table = [2][16]short{{
+		0x1ac, 0x17c, 0x154, 0x140, 0x11e, 0x0fe, 0x0e2, 0x0d6, // NTSC
+		0x0be, 0x0a0, 0x08e, 0x080, 0x06a, 0x054, 0x048, 0x036,
+	}, {
+		0x18e, 0x161, 0x13c, 0x129, 0x10a, 0x0ec, 0x0d2, 0x0c7, // PAL (totally untested)
+		0x0b1, 0x095, 0x084, 0x077, 0x062, 0x04e, 0x043, 0x032, // to do: verify PAL periods
+	}}
+
+	dac_table = [128]unsigned_char{
+		0, 0, 1, 2, 2, 3, 3, 4, 5, 5, 6, 7, 7, 8, 8, 9,
+		10, 10, 11, 11, 12, 13, 13, 14, 14, 15, 15, 16, 17, 17, 18, 18,
+		19, 19, 20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 25, 25, 26, 26,
+		27, 27, 28, 28, 29, 29, 30, 30, 31, 31, 32, 32, 32, 33, 33, 34,
+		34, 35, 35, 35, 36, 36, 37, 37, 38, 38, 38, 39, 39, 40, 40, 40,
+		41, 41, 42, 42, 42, 43, 43, 44, 44, 44, 45, 45, 45, 46, 46, 47,
+		47, 47, 48, 48, 48, 49, 49, 49, 50, 50, 50, 51, 51, 51, 52, 52,
+		52, 53, 53, 53, 54, 54, 54, 55, 55, 55, 56, 56, 56, 57, 57, 57,
+	}
+)
+
+func (d *DMC) write_register(addr int, data int) {
+	if addr == 0 {
+		d.period = int(dmc_period_table[cbool.ToInt[int](d.pal_mode)][data&15])
+		d.irq_enabled = (data & 0xc0) == 0x80 // enabled only if loop disabled
+		d.irq_flag = d.irq_flag && d.irq_enabled
+		d.recalc_irq()
+	} else if addr == 1 {
+		if !d.nonlinear {
+			// adjust last_amp so that "pop" amplitude will be properly non-linear
+			// with respect to change in dac
+			var old_amp int = int(dac_table[d.dac])
+			d.dac = data & 0x7F
+			var diff int = int(dac_table[d.dac]) - old_amp
+			d.last_amp = d.dac - diff
+		}
+
+		d.dac = data & 0x7F
+	}
+}
+
+func (d *DMC) recalc_irq() {
+	var irq cpu_time_t = NESAPINoIRQ
+	if d.irq_enabled && cbool.FromInt(d.length_counter) {
+		irq = cpu_time_t(int(d.apu.lastTime) + d.delay +
+			((d.length_counter-1)*8+d.bits_remain-1)*d.period + 1)
+	}
+	if irq != d.nextIRQ {
+		d.nextIRQ = irq
+		d.apu.irq_changed()
+	}
 }
